@@ -23,6 +23,7 @@ class WandaTTSEngine:
         self.el_keys = []
         self.active_el_keys = []
         self.key_blacklist = {}
+        self.pool_score = 0
         
         # Initialize
         self.load_keys_from_firebase()
@@ -95,16 +96,26 @@ class WandaTTSEngine:
             if r.status_code == 200:
                 d = r.json()
                 if d.get("tier", "free").lower() == "free": return None # Flash needs Paid
-                return {"key": key, "credits": d.get("character_limit", 0) - d.get("character_count", 0)}
+                return {
+                    "key": key, 
+                    "credits": d.get("character_limit", 0) - d.get("character_count", 0),
+                    "percent": ( (d.get("character_limit", 0) - d.get("character_count", 0)) / d.get("character_limit", 1) * 100 )
+                }
         except: pass
         return None
 
     def refresh_key_pool(self):
         """Identify which ElevenLabs keys are healthy (Starter+ Tier)."""
         with ThreadPoolExecutor(max_workers=5) as executor:
-            self.active_el_keys = list(filter(None, executor.map(self._check_el_key, self.el_keys)))
-        self.active_el_keys.sort(key=lambda x: -x['credits'])
-        print(f"[Wanda-TTS] Pool Active: {len(self.active_el_keys)} keys.")
+            results = list(filter(None, executor.map(self._check_el_key, self.el_keys)))
+        
+        self.active_el_keys = sorted(results, key=lambda x: -x['credits'])
+        
+        # Calculate pool score (average of starting keys)
+        if self.active_el_keys:
+            self.pool_score = int(sum(k['percent'] for k in self.active_el_keys) / len(self.active_el_keys))
+        
+        print(f"[Wanda-TTS] Pool Active: {len(self.active_el_keys)} keys. Score: {self.pool_score}%")
 
     def get_el_key(self):
         for info in self.active_el_keys:
@@ -137,7 +148,11 @@ engine = WandaTTSEngine()
 
 @app.get("/")
 def health():
-    return {"status": "Wanda ElevenLabs Engine Live", "el_pool": len(engine.active_el_keys)}
+    return {
+        "status": "Wanda ElevenLabs Engine Live", 
+        "el_pool": len(engine.active_el_keys),
+        "score": engine.pool_score
+    }
 
 @app.get("/stream")
 async def stream(text: str = Query(..., description="Speech Text")):
@@ -145,7 +160,11 @@ async def stream(text: str = Query(..., description="Speech Text")):
     ElevenLabs streaming endpoint.
     """
     if engine.active_el_keys:
-        return StreamingResponse(engine.stream_provider_el(text), media_type="audio/mpeg")
+        return StreamingResponse(
+            engine.stream_provider_el(text), 
+            media_type="audio/mpeg",
+            headers={"X-Pool-Score": str(engine.pool_score)}
+        )
     else:
         return {"error": "No healthy ElevenLabs keys available"}
 
