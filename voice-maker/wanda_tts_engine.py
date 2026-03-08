@@ -11,18 +11,16 @@ from concurrent.futures import ThreadPoolExecutor
 # Load env for local testing
 load_dotenv()
 
-app = FastAPI(title="Wanda TTS Master Engine")
+app = FastAPI(title="Wanda TTS ElevenLabs Engine")
 
 class WandaTTSEngine:
     def __init__(self):
         # Config
         self.voice_id = "EXAVITQu4vr4xnSDxMaL" # ElevenLabs Sarah
-        self.dg_voice = "aura-asteria-en"       # Deepgram Asteria
         self.firebase_url = "https://smart-switch010a-default-rtdb.asia-southeast1.firebasedatabase.app/tts/keys.json"
         
         # State
         self.el_keys = []
-        self.dg_key = os.getenv("DEEPGRAM_API_KEY")
         self.active_el_keys = []
         self.key_blacklist = {}
         
@@ -37,9 +35,9 @@ class WandaTTSEngine:
             if r.status_code == 200 and r.json():
                 data = r.json()
                 self.el_keys = data if isinstance(data, list) else data.split(",")
-                print(f"[Master-TTS] Loaded {len(self.el_keys)} keys from Firebase.")
+                print(f"[Wanda-TTS] Loaded {len(self.el_keys)} keys from Firebase.")
         except Exception as e:
-            print(f"[Master-TTS] Firebase Load Error: {e}")
+            print(f"[Wanda-TTS] Firebase Load Error: {e}")
             self.el_keys = os.getenv("ELEVENLABS_KEYS", "").split(",")
 
     def _check_el_key(self, key):
@@ -57,7 +55,7 @@ class WandaTTSEngine:
         with ThreadPoolExecutor(max_workers=5) as executor:
             self.active_el_keys = list(filter(None, executor.map(self._check_el_key, self.el_keys)))
         self.active_el_keys.sort(key=lambda x: -x['credits'])
-        print(f"[Master-TTS] Pool Active: {len(self.active_el_keys)} keys.")
+        print(f"[Wanda-TTS] Pool Active: {len(self.active_el_keys)} keys.")
 
     def get_el_key(self):
         for info in self.active_el_keys:
@@ -85,34 +83,22 @@ class WandaTTSEngine:
             self.key_blacklist[key] = time.time() + 3600
             yield from self.stream_provider_el(text)
 
-    def stream_provider_dg(self, text):
-        """Stream from Deepgram Aura (Ultra-fast backup)."""
-        if not self.dg_key: return None
-        url = f"https://api.deepgram.com/v1/speak?model={self.dg_voice}&encoding=mp3"
-        r = requests.post(url, json={"text": text}, headers={"Authorization": f"Token {self.dg_key}"}, stream=True, timeout=10)
-        if r.status_code == 200:
-            for chunk in r.iter_content(chunk_size=4096):
-                if chunk: yield chunk
-
 # Singleton engine
 engine = WandaTTSEngine()
 
 @app.get("/")
 def health():
-    return {"status": "Wanda Master Engine Live", "el_pool": len(engine.active_el_keys), "dg_active": bool(engine.dg_key)}
+    return {"status": "Wanda ElevenLabs Engine Live", "el_pool": len(engine.active_el_keys)}
 
 @app.get("/stream")
-async def stream(text: str = Query(..., description="Speech Text"), provider: str = "eleven"):
+async def stream(text: str = Query(..., description="Speech Text")):
     """
-    Unified streaming endpoint.
-    provider="eleven" (Main - High Quality)
-    provider="deepgram" (Ultra-Low Latency / Backup)
+    ElevenLabs streaming endpoint.
     """
-    if provider == "eleven" and engine.active_el_keys:
+    if engine.active_el_keys:
         return StreamingResponse(engine.stream_provider_el(text), media_type="audio/mpeg")
     else:
-        # Fallback or direct requested Deepgram
-        return StreamingResponse(engine.stream_provider_dg(text), media_type="audio/mpeg")
+        return {"error": "No healthy ElevenLabs keys available"}
 
 if __name__ == "__main__":
     import uvicorn
