@@ -1,10 +1,4 @@
-deepgram-sdk
-httpx
-pyaudio
-pvporcupine
-webrtcvad
 requests
 python-dotenv
-elevenlabs
 fastapi
 uvicorn
