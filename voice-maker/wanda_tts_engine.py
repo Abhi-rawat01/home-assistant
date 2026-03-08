@@ -145,6 +145,7 @@ class WandaTTSEngine:
 engine = WandaTTSEngine()
 
 @app.get("/")
+@app.head("/")
 def health():
     return {"status": "Wanda Engine Hot & Ready", "el_pool": len(engine.active_el_keys), "score": engine.pool_score}
 
