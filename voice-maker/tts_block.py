@@ -18,14 +18,45 @@ class TTSBlock:
         self.voice_id = "EXAVITQu4vr4xnSDxMaL"  # Default: Sarah
         self.model_id = "eleven_flash_v2_5"
         self.credit_threshold = 200
+        self.firebase_url = "https://smart-switch010a-default-rtdb.asia-southeast1.firebasedatabase.app/tts/keys.json"
+        
+        # State
+        self.is_refreshing = False
+        self.last_refresh = 0
         
         # Key Management
-        self.raw_keys = os.getenv("ELEVENLABS_KEYS", "").split(",")
-        self.keys = [k.strip() for k in self.raw_keys if k.strip()]
+        self.keys = []
+        self.load_keys()
         
         self.active_keys = [] # List of dicts with credit info
         self.key_blacklist = {} # {key: expiry_time}
         self.pool_percentage = 0
+        
+        # Initialize pool
+        self.refresh_key_pool()
+
+    def load_keys(self):
+        """Attempts to load keys from Firebase first, then falls back to .env."""
+        try:
+            print("[TTS-Block] Attempting to load keys from Firebase...")
+            r = requests.get(self.firebase_url, timeout=5)
+            if r.status_code == 200 and r.json():
+                fb_keys = r.json()
+                if isinstance(fb_keys, list):
+                    self.keys = [k.strip() for k in fb_keys if k.strip()]
+                    print(f"[TTS-Block] Loaded {len(self.keys)} keys from Firebase.")
+                    return
+                elif isinstance(fb_keys, str):
+                    self.keys = [k.strip() for k in fb_keys.split(",") if k.strip()]
+                    print(f"[TTS-Block] Loaded {len(self.keys)} keys from Firebase string.")
+                    return
+        except Exception as e:
+            print(f"[TTS-Block] Firebase load failed: {e}")
+
+        # Fallback to .env
+        raw_keys = os.getenv("ELEVENLABS_KEYS", "").split(",")
+        self.keys = [k.strip() for k in raw_keys if k.strip()]
+        print(f"[TTS-Block] Loaded {len(self.keys)} keys from .env fallback.")
         
         # State
         self.is_refreshing = False
