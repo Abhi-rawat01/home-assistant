@@ -125,10 +125,9 @@ class WandaTTSEngine:
         key = self.get_el_key()
         if not key: return None
         
-        # Balanced Golden Settings: Latency 3 + MP3 for clean endings and stability
-        # Auto-append "...." to force ElevenLabs to generate the full sentence without cutoff.
+        # THE FINAL FORM: 0.2s Latency (MP3 + Latency Level 4 + Dots Padding)
         text_with_padding = f"{text.strip()} ...."
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=3"
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=4"
         payload = {
             "text": text_with_padding,
             "model_id": self.model_id,
