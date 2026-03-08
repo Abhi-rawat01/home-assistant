@@ -27,6 +27,27 @@ class WandaTTSEngine:
         # Initialize
         self.load_keys_from_firebase()
         self.refresh_key_pool()
+        
+        # Self-Ping to keep Render awake (Pings every 14 minutes)
+        self.keep_awake_thread = threading.Thread(target=self._keep_awake, daemon=True)
+        self.keep_awake_thread.start()
+
+    def _keep_awake(self):
+        """Pings the server itself to prevent Render's free tier from sleeping."""
+        url = os.getenv("RENDER_EXTERNAL_URL")
+        if not url:
+            print("[Wanda-TTS] RENDER_EXTERNAL_URL not set. Self-ping disabled.")
+            return
+
+        print(f"[Wanda-TTS] Self-ping active for: {url}")
+        while True:
+            try:
+                # Wait 14 minutes (Render sleeps after 15)
+                time.sleep(14 * 60)
+                r = requests.get(url, timeout=10)
+                print(f"[Wanda-TTS] Keep-awake ping: {r.status_code}")
+            except Exception as e:
+                print(f"[Wanda-TTS] Keep-awake failed: {e}")
 
     def load_keys_from_firebase(self):
         """Fetch ElevenLabs keys from RTDB."""
