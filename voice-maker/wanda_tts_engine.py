@@ -125,12 +125,12 @@ class WandaTTSEngine:
         key = self.get_el_key()
         if not key: return None
         
-        # Shift to PCM 16kHz (Direct play, zero decoding delay)
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=4"
+        # High-Fidelity PCM 24kHz (Crystal clear + Ultra fast)
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=3"
         payload = {
             "text": text,
             "model_id": self.model_id,
-            "output_format": "pcm_16000",
+            "output_format": "pcm_24000",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}
         }
         # Use persistent session for the post request too
