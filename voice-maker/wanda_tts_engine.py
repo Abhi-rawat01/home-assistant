@@ -66,13 +66,25 @@ class WandaTTSEngine:
                 print(f"[Wanda-TTS] Keep-awake failed: {e}")
 
     def load_keys_from_firebase(self):
-        """Fetch ElevenLabs keys from RTDB."""
+        """Fetch ElevenLabs keys from RTDB with optional authentication."""
         try:
-            r = requests.get(self.firebase_url, timeout=5)
+            url = self.firebase_url
+            secret = os.getenv("FIREBASE_SECRET")
+            if secret:
+                url += f"?auth={secret}"
+                print("[Wanda-TTS] Using Secure Firebase Connection.")
+            else:
+                print("[Wanda-TTS] Using Public Firebase Connection (Warning: Insecure!)")
+
+            r = requests.get(url, timeout=5)
             if r.status_code == 200 and r.json():
                 data = r.json()
                 self.el_keys = data if isinstance(data, list) else data.split(",")
                 print(f"[Wanda-TTS] Loaded {len(self.el_keys)} keys from Firebase.")
+            elif r.status_code == 401:
+                print("[Wanda-TTS] Firebase Permission Denied. Check your FIREBASE_SECRET.")
+            else:
+                print(f"[Wanda-TTS] Firebase Error: {r.status_code}")
         except Exception as e:
             print(f"[Wanda-TTS] Firebase Load Error: {e}")
             self.el_keys = os.getenv("ELEVENLABS_KEYS", "").split(",")
