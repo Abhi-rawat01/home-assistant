@@ -34,12 +34,28 @@ class WandaTTSEngine:
 
     def _keep_awake(self):
         """Pings the server itself to prevent Render's free tier from sleeping."""
-        url = os.getenv("RENDER_EXTERNAL_URL")
-        if not url:
-            print("[Wanda-TTS] RENDER_EXTERNAL_URL not set. Self-ping disabled.")
+        # Render provides RENDER_EXTERNAL_HOSTNAME automatically on most deployments
+        hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+        if not hostname:
+            # Fallback to service-name based URL if available
+            srv_name = os.getenv("RENDER_SERVICE_NAME")
+            if srv_name:
+                hostname = f"{srv_name}.onrender.com"
+        
+        if not hostname:
+            print("[Wanda-TTS] Hostname not found. Give manual override: 'RENDER_EXTERNAL_URL'")
+            # Check for manual override if auto-detect fails
+            hostname = os.getenv("RENDER_EXTERNAL_URL")
+            if hostname:
+                hostname = hostname.replace("https://", "").replace("http://", "").split("/")[0]
+
+        if not hostname:
+            print("[Wanda-TTS] Error: Could not detect self-URL. Service might sleep.")
             return
 
+        url = f"https://{hostname}"
         print(f"[Wanda-TTS] Self-ping active for: {url}")
+        
         while True:
             try:
                 # Wait 14 minutes (Render sleeps after 15)
