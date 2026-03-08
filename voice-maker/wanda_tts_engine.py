@@ -125,13 +125,15 @@ class WandaTTSEngine:
         key = self.get_el_key()
         if not key: return None
         
-        # High-Fidelity PCM 24kHz (Crystal clear + Ultra fast)
+        # Balanced Golden Settings: Latency 3 + MP3 for clean endings and stability
+        # Auto-append "...." to force ElevenLabs to generate the full sentence without cutoff.
+        text_with_padding = f"{text.strip()} ...."
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=3"
         payload = {
-            "text": text,
+            "text": text_with_padding,
             "model_id": self.model_id,
-            "output_format": "pcm_24000",
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}
+            "output_format": "mp3_44100_128",
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
         }
         # Use persistent session for the post request too
         r = self.session.post(url, json=payload, headers={"xi-api-key": key}, stream=True, timeout=10)
