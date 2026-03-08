@@ -125,12 +125,12 @@ class WandaTTSEngine:
         key = self.get_el_key()
         if not key: return None
         
-        # Golden Settings: Latency 3 + 128kbps for the best balance of travel speed and stability
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=3"
+        # Shift to PCM 16kHz (Direct play, zero decoding delay)
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=4"
         payload = {
             "text": text,
             "model_id": self.model_id,
-            "output_format": "mp3_44100_128",
+            "output_format": "pcm_16000",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}
         }
         # Use persistent session for the post request too
@@ -149,6 +149,14 @@ engine = WandaTTSEngine()
 @app.head("/")
 def health():
     return {"status": "Wanda Engine Hot & Ready", "el_pool": len(engine.active_el_keys), "score": engine.pool_score}
+
+@app.get("/lease-key")
+def lease():
+    """Lease a healthy key to the local client for direct communication."""
+    key = engine.get_el_key()
+    if key:
+        return {"key": key, "score": engine.pool_score, "model": engine.model_id}
+    return {"error": "No keys available"}
 
 @app.get("/stream")
 async def stream(text: str = Query(..., description="Speech Text")):
