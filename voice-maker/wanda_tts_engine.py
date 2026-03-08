@@ -125,11 +125,12 @@ class WandaTTSEngine:
         key = self.get_el_key()
         if not key: return None
         
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream"
+        # Ultra-Low Latency optimization + lower bitrate for faster cross-ocean travel
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?optimize_streaming_latency=4"
         payload = {
             "text": text,
             "model_id": self.model_id,
-            "output_format": "mp3_44100_128",
+            "output_format": "mp3_44100_64",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}
         }
         # Use persistent session for the post request too
