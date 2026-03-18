@@ -208,12 +208,16 @@ def credit():
 
 
 def _keep_alive(port):
-    time.sleep(30)  # Wait for Flask to fully start
+    time.sleep(30)  # Wait for Flask
     while True:
         time.sleep(600)  # Ping every 10 minutes
         try:
-            requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=10)
-            print("🏓 Internal ping OK.")
+            # Render needs to see EXTERNAL traffic hit its proxy to reset the inactivity timer.
+            render_url = os.environ.get("RENDER_URL", "")
+            ping_url = f"{render_url.rstrip('/')}/v1/models" if render_url else f"http://127.0.0.1:{port}/v1/models"
+            
+            requests.get(ping_url, timeout=10)
+            print("🏓 External keep-alive ping hit successfully.")
         except:
             pass
 
