@@ -13,6 +13,10 @@ load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "../.env")))
 app = Flask(__name__)
 _keepalive_lock = threading.Lock()
 _keepalive_started = False
+_manager_lock = threading.Lock()
+_manager_initializing = False
+_manager_error = None
+omni = None
 
 
 class OmniTitanManager:
@@ -234,37 +238,110 @@ def _public_base_url():
     return ""
 
 
-omni = OmniTitanManager()
+def _initialize_omni():
+    global omni
+    global _manager_error
+    global _manager_initializing
+
+    try:
+        manager = OmniTitanManager()
+        with _manager_lock:
+            omni = manager
+            _manager_error = None
+            _manager_initializing = False
+        print("[Omni-Titan] Manager warm-up completed.")
+    except Exception as exc:
+        with _manager_lock:
+            omni = None
+            _manager_error = str(exc)
+            _manager_initializing = False
+        print(f"[Omni-Titan] Manager warm-up failed: {exc}")
+
+
+def _start_manager_init():
+    global _manager_initializing
+    global _manager_error
+
+    with _manager_lock:
+        if omni is not None or _manager_initializing:
+            return
+        _manager_initializing = True
+        _manager_error = None
+
+    thread = threading.Thread(target=_initialize_omni, daemon=True)
+    thread.start()
+    print("[Omni-Titan] Manager warm-up started.")
+
+
+def _manager_status():
+    with _manager_lock:
+        if omni is not None:
+            return "ready", None
+        if _manager_initializing:
+            return "warming_up", None
+        if _manager_error:
+            return "error", _manager_error
+        return "idle", None
+
+
+def _require_omni():
+    _start_manager_init()
+
+    with _manager_lock:
+        if omni is not None:
+            return omni, None
+
+        if _manager_initializing:
+            return None, ({"error": "Omni-Titan is warming up"}, 503)
+
+        if _manager_error:
+            return None, ({"error": "Omni-Titan initialization failed", "details": _manager_error}, 503)
+
+    return None, ({"error": "Omni-Titan is warming up"}, 503)
 
 
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat():
+    manager, error_response = _require_omni()
+    if error_response:
+        payload, status = error_response
+        return jsonify(payload), status
+
     gatekeeper = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     data = request.json or {}
-    payload, status = omni.chat_completion(gatekeeper, data.get("messages", []), data.get("model", "Coder-Fast"))
+    payload, status = manager.chat_completion(gatekeeper, data.get("messages", []), data.get("model", "Coder-Fast"))
     return jsonify(payload), status
 
 
 @app.route("/v1/models", methods=["GET"])
 def models():
-    return jsonify({"object": "list", "data": [{"id": model} for model in omni.MODEL_MAPPING]})
+    return jsonify({"object": "list", "data": [{"id": model} for model in OmniTitanManager.MODEL_MAPPING]})
 
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    return jsonify({"status": "ok"}), 200
+    manager_state, manager_error = _manager_status()
+    payload = {"status": "ok", "manager": manager_state}
+    if manager_error:
+        payload["manager_error"] = manager_error
+    return jsonify(payload), 200
 
 
 @app.route("/credit", methods=["POST"])
 def credit():
+    manager, error_response = _require_omni()
+    if error_response:
+        payload, status = error_response
+        return jsonify(payload), status
+
     gatekeeper = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    if gatekeeper not in omni.gatekeepers:
+    if gatekeeper not in manager.gatekeepers:
         return jsonify({"error": "Unauthorized"}), 401
 
-    with omni.lock:
-        segment = omni.gatekeeper_segments.get(gatekeeper, [])
-        remaining = sum(omni.ollama_health[key]["remaining_tokens"] for key in segment if key in omni.ollama_health)
-        capacity = len(segment) * omni.daily_limit
+    with manager.lock:
+        segment = manager.gatekeeper_segments.get(gatekeeper, [])
+        remaining = sum(manager.ollama_health[key]["remaining_tokens"] for key in segment if key in manager.ollama_health)
+        capacity = len(segment) * manager.daily_limit
 
     return jsonify(
         {
@@ -314,6 +391,7 @@ def _start_keep_alive():
         print(f"[Omni-Titan] Keep-alive thread started on port {port}")
 
 
+_start_manager_init()
 _start_keep_alive()
 
 
