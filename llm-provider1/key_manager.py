@@ -87,12 +87,18 @@ class OmniTitanManager:
                           if today == cloud.get("last_sync_date", "") else self.daily_limit
                     self.ollama_health[k] = {"id": f"key_{idx+1}", "remaining_tokens": rem}
 
-                if len(self.gatekeepers) >= 5 and len(self.ollama_keys) >= 51:
-                    self.gatekeeper_segments[self.gatekeepers[0]] = self.ollama_keys[0:11]
-                    self.gatekeeper_segments[self.gatekeepers[1]] = self.ollama_keys[11:21]
-                    self.gatekeeper_segments[self.gatekeepers[2]] = self.ollama_keys[21:31]
-                    self.gatekeeper_segments[self.gatekeepers[3]] = self.ollama_keys[31:41]
-                    self.gatekeeper_segments[self.gatekeepers[4]] = self.ollama_keys[41:51]
+                if self.gatekeepers and self.ollama_keys:
+                    gk_count = len(self.gatekeepers)
+                    total_keys = len(self.ollama_keys)
+                    base_sz = total_keys // gk_count
+                    rem = total_keys % gk_count
+                    
+                    cur_idx = 0
+                    for i, gk in enumerate(self.gatekeepers):
+                        # API 0 absorbs the remainder
+                        alloc = base_sz + rem if i == 0 else base_sz
+                        self.gatekeeper_segments[gk] = self.ollama_keys[cur_idx : cur_idx + alloc]
+                        cur_idx += alloc
 
             print(f"📡 {len(self.ollama_keys)} Ollama + {len(self.or_keys)} OpenRouter keys loaded.")
             self._persist()
