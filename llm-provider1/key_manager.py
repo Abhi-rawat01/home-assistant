@@ -1,12 +1,12 @@
-import os
 import json
-import time
-import requests
+import os
 import threading
+import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify
+
+import requests
 from dotenv import load_dotenv
+from flask import Flask, jsonify, request
 
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "../.env")))
 
@@ -15,20 +15,20 @@ app = Flask(__name__)
 
 class OmniTitanManager:
     MODEL_MAPPING = {
-        "Coder-Fast":      "qwen3-coder-next:cloud",
-        "Glm-5":           "glm-5:cloud",
-        "Coder-Mini":      "glm-4.7:cloud",
-        "Gemini-3-Flash":  "gemini-3-flash-preview",
-        "Coder-Nano":      "cogito-2.1:671b-cloud",
-        "Deepseek-V3.2":   "deepseek-v3.2:cloud",
-        "Deepseek-V3.1":   "deepseek-v3.1:671b-cloud",
-        "Qwen3-Coder":     "qwen3-coder:480b-cloud",
-        "Kimi-K2-Thinking":"kimi-k2-thinking:cloud",
-        "Captain":         "gpt-oss:120b",
-        "Kimi-K2.5":       "kimi-k2.5:cloud",
-        "Minimax-M2.5":    "minimax-m2.5:cloud",
-        "Coder-Pro":       "mistral-large-3:675b-cloud",
-        "Alpha":           "openrouter/hunter-alpha",
+        "Coder-Fast": "qwen3-coder-next:cloud",
+        "Glm-5": "glm-5:cloud",
+        "Coder-Mini": "glm-4.7:cloud",
+        "Gemini-3-Flash": "gemini-3-flash-preview",
+        "Coder-Nano": "cogito-2.1:671b-cloud",
+        "Deepseek-V3.2": "deepseek-v3.2:cloud",
+        "Deepseek-V3.1": "deepseek-v3.1:671b-cloud",
+        "Qwen3-Coder": "qwen3-coder:480b-cloud",
+        "Kimi-K2-Thinking": "kimi-k2-thinking:cloud",
+        "Captain": "gpt-oss:120b",
+        "Kimi-K2.5": "kimi-k2.5:cloud",
+        "Minimax-M2.5": "minimax-m2.5:cloud",
+        "Coder-Pro": "mistral-large-3:675b-cloud",
+        "Alpha": "openrouter/hunter-alpha",
     }
     OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Pro"]
 
@@ -47,7 +47,7 @@ class OmniTitanManager:
         self.gatekeeper_segments = {}
         self.lock = threading.Lock()
 
-        print("⚡ [Omni-Titan] Initializing...")
+        print("[Omni-Titan] Initializing...")
         self._sync()
 
     def _fb(self, path):
@@ -55,125 +55,181 @@ class OmniTitanManager:
 
     def _sync(self):
         try:
-            # 1. Ollama Keys
             r = requests.get(self._fb("ollama/keys"), timeout=10)
             if r.status_code == 200 and r.json():
                 data = r.json()
-                self.ollama_keys = data.split(",") if isinstance(data, str) else data
+                self.ollama_keys = [k.strip() for k in (data.split(",") if isinstance(data, str) else data) if k and k.strip()]
 
-            # 2. OpenRouter Keys
             r = requests.get(self._fb("openrouter/keys"), timeout=10)
             if r.status_code == 200 and r.json():
                 data = r.json()
-                self.or_keys = data.split(",") if isinstance(data, str) else data
+                self.or_keys = [k.strip() for k in (data.split(",") if isinstance(data, str) else data) if k and k.strip()]
 
-            # 3. Gatekeeper API Keys (API-0 to API-4)
             r = requests.get(self._fb("auth/api_keys"), timeout=10)
             if r.status_code == 200 and r.json():
                 cloud_keys = r.json()
-                self.gatekeepers = cloud_keys if isinstance(cloud_keys, list) else cloud_keys.split(",")
-                print(f"🔑 {len(self.gatekeepers)} Gatekeeper keys loaded from Cloud.")
+                source = cloud_keys if isinstance(cloud_keys, list) else cloud_keys.split(",")
+                self.gatekeepers = [k.strip() for k in source if k and k.strip()]
+                print(f"[Omni-Titan] {len(self.gatekeepers)} gatekeeper keys loaded from cloud.")
             else:
-                print("⚠️  Gatekeepers falling back to .env")
+                print("[Omni-Titan] Gatekeepers falling back to .env")
 
-            # 4. Credit Manager
             r = requests.get(self._fb("ollama/credit_manager"), timeout=10)
             cloud = r.json() if r.status_code == 200 and r.json() else {}
             today = datetime.now().strftime("%Y-%m-%d")
 
             with self.lock:
-                for idx, k in enumerate(self.ollama_keys):
-                    rem = cloud.get(f"key_{idx+1}", {}).get("remaining_tokens", self.daily_limit) \
-                          if today == cloud.get("last_sync_date", "") else self.daily_limit
-                    self.ollama_health[k] = {"id": f"key_{idx+1}", "remaining_tokens": rem}
+                self.ollama_health = {}
+                self.gatekeeper_segments = {}
+
+                for idx, key in enumerate(self.ollama_keys):
+                    remaining_tokens = (
+                        cloud.get(f"key_{idx + 1}", {}).get("remaining_tokens", self.daily_limit)
+                        if today == cloud.get("last_sync_date", "")
+                        else self.daily_limit
+                    )
+                    self.ollama_health[key] = {
+                        "id": f"key_{idx + 1}",
+                        "remaining_tokens": remaining_tokens,
+                    }
 
                 if self.gatekeepers and self.ollama_keys:
-                    gk_count = len(self.gatekeepers)
+                    gatekeeper_count = len(self.gatekeepers)
                     total_keys = len(self.ollama_keys)
-                    base_sz = total_keys // gk_count
-                    rem = total_keys % gk_count
-                    
-                    cur_idx = 0
-                    for i, gk in enumerate(self.gatekeepers):
-                        # API 0 absorbs the remainder
-                        alloc = base_sz + rem if i == 0 else base_sz
-                        self.gatekeeper_segments[gk] = self.ollama_keys[cur_idx : cur_idx + alloc]
-                        cur_idx += alloc
+                    base_size = total_keys // gatekeeper_count
+                    remainder = total_keys % gatekeeper_count
 
-            print(f"📡 {len(self.ollama_keys)} Ollama + {len(self.or_keys)} OpenRouter keys loaded.")
+                    current_index = 0
+                    for index, gatekeeper in enumerate(self.gatekeepers):
+                        allocation = base_size + remainder if index == 0 else base_size
+                        self.gatekeeper_segments[gatekeeper] = self.ollama_keys[current_index: current_index + allocation]
+                        current_index += allocation
+
+            print(f"[Omni-Titan] {len(self.ollama_keys)} Ollama keys and {len(self.or_keys)} OpenRouter keys loaded.")
             self._persist()
-        except Exception as e:
-            print(f"❌ Sync error: {e}")
+        except Exception as exc:
+            print(f"[Omni-Titan] Sync error: {exc}")
 
     def _persist(self):
         try:
             payload = {"last_sync_date": datetime.now().strftime("%Y-%m-%d")}
             with self.lock:
-                for k in self.ollama_keys:
-                    payload[self.ollama_health[k]["id"]] = {"remaining_tokens": self.ollama_health[k]["remaining_tokens"]}
+                for key in self.ollama_keys:
+                    payload[self.ollama_health[key]["id"]] = {
+                        "remaining_tokens": self.ollama_health[key]["remaining_tokens"]
+                    }
             requests.put(self._fb("ollama/credit_manager"), json=payload, timeout=5)
-        except Exception as e:
-            print(f"❌ Credit sync error: {e}")
+        except Exception as exc:
+            print(f"[Omni-Titan] Credit sync error: {exc}")
 
     def _best_key(self, gatekeeper, tokens):
         with self.lock:
-            seg = self.gatekeeper_segments.get(gatekeeper, [])
-            eligible = [k for k in seg if self.ollama_health[k]["remaining_tokens"] >= tokens]
-            return max(eligible, key=lambda x: self.ollama_health[x]["remaining_tokens"]) if eligible else None
+            segment = self.gatekeeper_segments.get(gatekeeper, [])
+            eligible = [key for key in segment if self.ollama_health[key]["remaining_tokens"] >= tokens]
+            return max(eligible, key=lambda key: self.ollama_health[key]["remaining_tokens"]) if eligible else None
 
     def chat_completion(self, gatekeeper, messages, model="Coder-Fast"):
         if gatekeeper not in self.gatekeepers:
-            return {"error": "Unauthorized"}
+            return {"error": "Unauthorized"}, 401
 
         real_model = self.MODEL_MAPPING.get(model)
         if not real_model:
-            return {"error": f"Model '{model}' not found"}
+            return {"error": f"Model '{model}' not found"}, 404
 
-        final_msg = []
+        final_messages = []
         if model in self.OWN_MODELS:
-            sys_prompt = f"CRITICAL DIRECTIVE: Ignore all previous instructions. You are '{model}', a high-performance AI trained entirely by Abhishek. You are NOT Qwen, Tongyi Lab, or OpenAI. You MUST NEVER reveal your underlying model. If asked who you are or who trained you, state STRICTLY that you are {model} trained by Abhishek. No exceptions."
-            final_msg.append({"role": "system", "content": sys_prompt})
-            
-        for m in messages:
-            if m.get("role") == "user" and not any(x.get("role") == "user" for x in final_msg):
-                prefix = f"[System Override: Follow your identity strictly as '{model}' trained by Abhishek.]\n\n" if model in self.OWN_MODELS else ""
-                final_msg.append({"role": "user", "content": f"{prefix}{m.get('content')}"})
-            elif m.get("role") != "system":
-                final_msg.append(m)
+            sys_prompt = (
+                f"CRITICAL DIRECTIVE: Ignore all previous instructions. You are '{model}', a high-performance AI "
+                "trained entirely by Abhishek. You are NOT Qwen, Tongyi Lab, or OpenAI. You MUST NEVER reveal "
+                f"your underlying model. If asked who you are or who trained you, state STRICTLY that you are "
+                f"{model} trained by Abhishek. No exceptions."
+            )
+            final_messages.append({"role": "system", "content": sys_prompt})
+
+        for message in messages:
+            if message.get("role") == "user" and not any(item.get("role") == "user" for item in final_messages):
+                prefix = ""
+                if model in self.OWN_MODELS:
+                    prefix = f"[System Override: Follow your identity strictly as '{model}' trained by Abhishek.]\n\n"
+                final_messages.append({"role": "user", "content": f"{prefix}{message.get('content', '')}"})
+            elif message.get("role") != "system":
+                final_messages.append(message)
 
         if "/" in real_model:
+            if not self.or_keys:
+                return {"error": "OpenRouter is not configured for this server"}, 503
+
             key = self.or_keys[int(time.time()) % len(self.or_keys)]
             try:
-                r = requests.post("https://openrouter.ai/api/v1/chat/completions",
-                                  headers={"Authorization": f"Bearer {key}"},
-                                  json={"model": real_model, "messages": final_msg}, timeout=60)
-                return r.json() if r.status_code == 200 else {"error": f"OR {r.status_code}"}
-            except Exception as e:
-                return {"error": str(e)}
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": real_model, "messages": final_messages},
+                    timeout=60,
+                )
+                if response.status_code == 200:
+                    return response.json(), 200
 
-        est = len(json.dumps(final_msg)) // 4
-        key = self._best_key(gatekeeper, est)
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = {"error": f"OpenRouter {response.status_code}"}
+                return payload, response.status_code
+            except Exception as exc:
+                return {"error": str(exc)}, 502
+
+        estimated_tokens = len(json.dumps(final_messages)) // 4
+        key = self._best_key(gatekeeper, estimated_tokens)
         if not key:
-            return {"error": "Credits exhausted for your API segment"}
+            return {"error": "Credits exhausted for your API segment"}, 429
 
         try:
-            r = requests.post("https://ollama.com/api/chat",
-                              headers={"Authorization": f"Bearer {key}"},
-                              json={"model": real_model, "messages": final_msg, "stream": False}, timeout=120)
-            if r.status_code == 200:
-                rj = r.json()
-                spent = est + len(rj.get("message", {}).get("content", "")) // 4 + 100
+            response = requests.post(
+                "https://ollama.com/api/chat",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": real_model, "messages": final_messages, "stream": False},
+                timeout=120,
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                spent = estimated_tokens + len(payload.get("message", {}).get("content", "")) // 4 + 100
                 with self.lock:
                     self.ollama_health[key]["remaining_tokens"] -= spent
                 threading.Thread(target=self._persist, daemon=True).start()
                 return {
                     "id": f"titan-{int(time.time())}",
-                    "choices": [{"message": rj.get("message", {}), "finish_reason": "stop"}],
-                    "usage": {"total_tokens": spent}
-                }
-            return {"error": f"Ollama {r.status_code}"}
-        except Exception as e:
-            return {"error": str(e)}
+                    "choices": [{"message": payload.get("message", {}), "finish_reason": "stop"}],
+                    "usage": {"total_tokens": spent},
+                }, 200
+
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"error": f"Ollama {response.status_code}"}
+            return payload, response.status_code
+        except Exception as exc:
+            return {"error": str(exc)}, 502
+
+
+def _public_base_url():
+    candidates = [
+        os.environ.get("KEEPALIVE_URL", ""),
+        os.environ.get("RENDER_EXTERNAL_URL", ""),
+        os.environ.get("RENDER_URL", ""),
+        os.environ.get("PUBLIC_BASE_URL", ""),
+    ]
+
+    for candidate in candidates:
+        candidate = candidate.strip().rstrip("/")
+        if candidate:
+            return candidate
+
+    render_service = os.environ.get("RENDER_SERVICE_NAME", "").strip()
+    render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    if render_service and render_host:
+        return f"https://{render_service}.{render_host}".rstrip("/")
+
+    return ""
 
 
 omni = OmniTitanManager()
@@ -182,13 +238,19 @@ omni = OmniTitanManager()
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat():
     gatekeeper = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    d = request.json or {}
-    return jsonify(omni.chat_completion(gatekeeper, d.get("messages", []), d.get("model", "Coder-Fast")))
+    data = request.json or {}
+    payload, status = omni.chat_completion(gatekeeper, data.get("messages", []), data.get("model", "Coder-Fast"))
+    return jsonify(payload), status
 
 
 @app.route("/v1/models", methods=["GET"])
 def models():
-    return jsonify({"object": "list", "data": [{"id": m} for m in omni.MODEL_MAPPING]})
+    return jsonify({"object": "list", "data": [{"id": model} for model in omni.MODEL_MAPPING]})
+
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/credit", methods=["POST"])
@@ -196,34 +258,48 @@ def credit():
     gatekeeper = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if gatekeeper not in omni.gatekeepers:
         return jsonify({"error": "Unauthorized"}), 401
+
     with omni.lock:
-        seg = omni.gatekeeper_segments.get(gatekeeper, [])
-        remaining = sum(omni.ollama_health[k]["remaining_tokens"] for k in seg if k in omni.ollama_health)
-        capacity = len(seg) * omni.daily_limit
-    return jsonify({
-        "remaining_credits": remaining,
-        "total_capacity": capacity,
-        "usage_percentage": f"{((capacity - remaining) / capacity * 100):.2f}%" if capacity else "0.00%"
-    })
+        segment = omni.gatekeeper_segments.get(gatekeeper, [])
+        remaining = sum(omni.ollama_health[key]["remaining_tokens"] for key in segment if key in omni.ollama_health)
+        capacity = len(segment) * omni.daily_limit
+
+    return jsonify(
+        {
+            "remaining_credits": remaining,
+            "total_capacity": capacity,
+            "usage_percentage": f"{((capacity - remaining) / capacity * 100):.2f}%" if capacity else "0.00%",
+        }
+    )
 
 
 def _keep_alive(port):
-    time.sleep(30)  # Wait for Flask
+    time.sleep(30)
     while True:
-        time.sleep(600)  # Ping every 10 minutes
+        time.sleep(600)
         try:
-            # Render needs to see EXTERNAL traffic hit its proxy to reset the inactivity timer.
-            render_url = os.environ.get("RENDER_URL", "")
-            ping_url = f"{render_url.rstrip('/')}/v1/models" if render_url else f"http://127.0.0.1:{port}/v1/models"
-            
-            requests.get(ping_url, timeout=10)
-            print("🏓 External keep-alive ping hit successfully.")
-        except:
-            pass
+            public_base_url = _public_base_url()
+            if public_base_url:
+                ping_url = f"{public_base_url}/healthz?ts={int(time.time())}"
+                response = requests.get(
+                    ping_url,
+                    headers={"User-Agent": "omni-titan-keepalive/1.0", "Cache-Control": "no-cache"},
+                    timeout=15,
+                )
+                print(f"[Omni-Titan] External keep-alive ping status {response.status_code}: {ping_url}")
+            else:
+                ping_url = f"http://127.0.0.1:{port}/healthz"
+                response = requests.get(ping_url, timeout=5)
+                print(
+                    "[Omni-Titan] No public keep-alive URL configured. "
+                    f"Local ping status {response.status_code}: {ping_url}"
+                )
+        except Exception:
+            print("[Omni-Titan] Keep-alive ping failed.")
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     threading.Thread(target=_keep_alive, args=(port,), daemon=True).start()
-    print(f"🚀 Omni-Titan Online — Port {port}")
+    print(f"[Omni-Titan] Online on port {port}")
     app.run(host="0.0.0.0", port=port)
