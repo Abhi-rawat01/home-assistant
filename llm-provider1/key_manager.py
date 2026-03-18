@@ -286,6 +286,7 @@ def _manager_status():
 
 def _require_omni():
     _start_manager_init()
+    _start_keep_alive()
 
     with _manager_lock:
         if omni is not None:
@@ -394,11 +395,6 @@ def _start_keep_alive():
 def _ensure_background_tasks_started():
     _start_manager_init()
     _start_keep_alive()
-
-
-@app.before_request
-def _before_request_start_background_tasks():
-    _ensure_background_tasks_started()
 
 
 if __name__ == "__main__":
