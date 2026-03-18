@@ -391,11 +391,18 @@ def _start_keep_alive():
         print(f"[Omni-Titan] Keep-alive thread started on port {port}")
 
 
-_start_manager_init()
-_start_keep_alive()
+def _ensure_background_tasks_started():
+    _start_manager_init()
+    _start_keep_alive()
+
+
+@app.before_request
+def _before_request_start_background_tasks():
+    _ensure_background_tasks_started()
 
 
 if __name__ == "__main__":
+    _ensure_background_tasks_started()
     port = int(os.environ.get("PORT", 5000))
     print(f"[Omni-Titan] Online on port {port}")
     app.run(host="0.0.0.0", port=port)
