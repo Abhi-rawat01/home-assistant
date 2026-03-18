@@ -11,6 +11,8 @@ from flask import Flask, jsonify, request
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "../.env")))
 
 app = Flask(__name__)
+_keepalive_lock = threading.Lock()
+_keepalive_started = False
 
 
 class OmniTitanManager:
@@ -298,8 +300,24 @@ def _keep_alive(port):
             print("[Omni-Titan] Keep-alive ping failed.")
 
 
+def _start_keep_alive():
+    global _keepalive_started
+
+    with _keepalive_lock:
+        if _keepalive_started:
+            return
+
+        port = int(os.environ.get("PORT", 5000))
+        thread = threading.Thread(target=_keep_alive, args=(port,), daemon=True)
+        thread.start()
+        _keepalive_started = True
+        print(f"[Omni-Titan] Keep-alive thread started on port {port}")
+
+
+_start_keep_alive()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    threading.Thread(target=_keep_alive, args=(port,), daemon=True).start()
     print(f"[Omni-Titan] Online on port {port}")
     app.run(host="0.0.0.0", port=port)
