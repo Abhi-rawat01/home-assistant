@@ -65,7 +65,15 @@ class OmniTitanManager:
 
     def _sync(self):
         try:
-            self.cerebras_keys = self._load_cerebras_keys()
+            self.cerebras_keys = []
+
+            r = requests.get(self._fb("cerebras/keys"), timeout=10)
+            if r.status_code == 200 and r.json():
+                data = r.json()
+                self.cerebras_keys = [k.strip() for k in (data.split(",") if isinstance(data, str) else data) if k and k.strip()]
+
+            if not self.cerebras_keys:
+                self.cerebras_keys = self._load_cerebras_keys()
 
             r = requests.get(self._fb("ollama/keys"), timeout=10)
             if r.status_code == 200 and r.json():
