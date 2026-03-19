@@ -16,6 +16,9 @@ _keepalive_started = False
 _manager_lock = threading.Lock()
 _manager_initializing = False
 _manager_error = None
+_model_registry_lock = threading.Lock()
+_model_registry_cache = {}
+_model_registry_cache_at = 0.0
 omni = None
 
 
@@ -605,6 +608,69 @@ def _public_base_url():
     return ""
 
 
+def _firebase_auth_query():
+    secret = os.getenv("FIREBASE_SECRET", "")
+    return f"?auth={secret}" if secret else ""
+
+
+def _firebase_path(path):
+    firebase_url = os.getenv("FIREBASE_URL", "").rstrip("/")
+    if not firebase_url:
+        return None
+    return f"{firebase_url}/{path}.json{_firebase_auth_query()}"
+
+
+def _load_model_registry_snapshot(force=False):
+    global _model_registry_cache
+    global _model_registry_cache_at
+
+    with _model_registry_lock:
+        if not force and _model_registry_cache and (time.time() - _model_registry_cache_at) < 60:
+            return dict(_model_registry_cache)
+
+    merged = {}
+    for path in OmniTitanManager.MODEL_PROVIDER_PATHS.values():
+        firebase_path = _firebase_path(path)
+        if not firebase_path:
+            continue
+
+        try:
+            response = requests.get(firebase_path, timeout=3)
+            if response.status_code != 200 or not response.json():
+                continue
+
+            data = response.json()
+            if isinstance(data, dict):
+                for alias, real_model in data.items():
+                    alias = str(alias).strip()
+                    real_model = str(real_model).strip()
+                    if alias and real_model:
+                        merged[alias] = real_model
+            elif isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    alias = str(item.get("alias", "")).strip()
+                    real_model = str(item.get("model", "")).strip()
+                    if alias and real_model:
+                        merged[alias] = real_model
+        except Exception:
+            continue
+
+    with _model_registry_lock:
+        if merged:
+            _model_registry_cache = merged
+            _model_registry_cache_at = time.time()
+        return dict(_model_registry_cache)
+
+
+def _current_model_mapping():
+    with _manager_lock:
+        if omni is not None:
+            return dict(omni.model_mapping)
+    return _load_model_registry_snapshot()
+
+
 def _initialize_omni():
     global omni
     global _manager_error
@@ -616,6 +682,11 @@ def _initialize_omni():
             omni = manager
             _manager_error = None
             _manager_initializing = False
+        with _model_registry_lock:
+            global _model_registry_cache
+            global _model_registry_cache_at
+            _model_registry_cache = dict(manager.model_mapping)
+            _model_registry_cache_at = time.time()
         print("[Omni-Titan] Manager warm-up completed.")
     except Exception as exc:
         with _manager_lock:
@@ -668,6 +739,29 @@ def _require_omni():
     return None, ({"error": "Omni-Titan is warming up"}, 503)
 
 
+@app.before_request
+def bootstrap_background_tasks():
+    _ensure_background_tasks_started()
+
+
+@app.route("/", methods=["GET"])
+def root():
+    manager_state, manager_error = _manager_status()
+    payload = {
+        "status": "ok",
+        "service": "Omni-Titan",
+        "manager": manager_state,
+    }
+    if manager_error:
+        payload["manager_error"] = manager_error
+    return jsonify(payload), 200
+
+
+@app.route("/favicon.ico", methods=["GET"])
+def favicon():
+    return "", 204
+
+
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat():
     manager, error_response = _require_omni()
@@ -683,11 +777,8 @@ def chat():
 
 @app.route("/v1/models", methods=["GET"])
 def models():
-    manager, error_response = _require_omni()
-    if error_response:
-        return jsonify({"object": "list", "data": [{"id": model} for model in OmniTitanManager.MODEL_MAPPING]})
-
-    return jsonify({"object": "list", "data": [{"id": model} for model in manager.model_mapping]})
+    model_mapping = _current_model_mapping()
+    return jsonify({"object": "list", "data": [{"id": model} for model in model_mapping]})
 
 
 @app.route("/healthz", methods=["GET"])
