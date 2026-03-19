@@ -36,6 +36,7 @@ class OmniTitanManager:
         "Minimax-M2.5": "minimax-m2.5:cloud",
         "Coder-Max": "minimax-m2.7:cloud",
         "Coder-Pro": "mistral-large-3:675b-cloud",
+        "Qwen-Flash": "cerebras/qwen-3-235b-a22b-instruct-2507",
         "Ghost-V1": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     }
     OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Max", "Coder-Pro"]
@@ -51,6 +52,7 @@ class OmniTitanManager:
 
         self.ollama_keys = []
         self.or_keys = []
+        self.cerebras_keys = []
         self.ollama_health = {}
         self.gatekeeper_segments = {}
         self.lock = threading.Lock()
@@ -63,6 +65,8 @@ class OmniTitanManager:
 
     def _sync(self):
         try:
+            self.cerebras_keys = self._load_cerebras_keys()
+
             r = requests.get(self._fb("ollama/keys"), timeout=10)
             if r.status_code == 200 and r.json():
                 data = r.json()
@@ -116,10 +120,25 @@ class OmniTitanManager:
                         self.gatekeeper_segments[gatekeeper] = self.ollama_keys[current_index: current_index + allocation]
                         current_index += allocation
 
-            print(f"[Omni-Titan] {len(self.ollama_keys)} Ollama keys and {len(self.or_keys)} OpenRouter keys loaded.")
+            print(
+                f"[Omni-Titan] {len(self.ollama_keys)} Ollama keys, "
+                f"{len(self.or_keys)} OpenRouter keys, and {len(self.cerebras_keys)} Cerebras keys loaded."
+            )
             self._persist()
         except Exception as exc:
             print(f"[Omni-Titan] Sync error: {exc}")
+
+    def _load_cerebras_keys(self):
+        keys = []
+        for name, value in os.environ.items():
+            if name.startswith("CEREBRAS_KEY_") and value.strip():
+                keys.append(value.strip())
+
+        main_key = os.getenv("MAIN_LLM_API_KEY", "").strip()
+        if main_key and main_key not in keys:
+            keys.append(main_key)
+
+        return keys
 
     def _persist(self):
         try:
@@ -178,6 +197,11 @@ class OmniTitanManager:
             eligible.sort(key=lambda key: self.ollama_health[key]["remaining_tokens"], reverse=True)
             return eligible
 
+    def _cerebras_key(self):
+        if not self.cerebras_keys:
+            return None
+        return self.cerebras_keys[int(time.time()) % len(self.cerebras_keys)]
+
     def chat_completion(self, gatekeeper, messages, model="Coder-Fast"):
         if gatekeeper not in self.gatekeepers:
             return {"error": "Unauthorized"}, 401
@@ -206,6 +230,36 @@ class OmniTitanManager:
                 final_messages.append(message)
 
         if "/" in real_model:
+            if real_model.startswith("cerebras/"):
+                key = self._cerebras_key()
+                if not key:
+                    return {"error": "Cerebras is not configured for this server"}, 503
+
+                try:
+                    response = requests.post(
+                        "https://api.cerebras.ai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={
+                            "model": real_model.split("/", 1)[1],
+                            "messages": final_messages,
+                            "stream": False,
+                            "max_tokens": 20000,
+                            "temperature": 0.7,
+                            "top_p": 0.8,
+                        },
+                        timeout=120,
+                    )
+                    if response.status_code == 200:
+                        return response.json(), 200
+
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = {"error": f"Cerebras {response.status_code}"}
+                    return payload, response.status_code
+                except Exception as exc:
+                    return {"error": str(exc)}, 502
+
             if not self.or_keys:
                 return {"error": "OpenRouter is not configured for this server"}, 503
 
