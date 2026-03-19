@@ -21,28 +21,7 @@ omni = None
 
 class OmniTitanManager:
     KEY_RETRY_INTERVAL = timedelta(hours=12)
-    MODEL_MAPPING = {
-        "Coder-Fast": "qwen3-coder-next:cloud",
-        "Glm-5": "glm-5:cloud",
-        "Coder-Mini": "glm-4.7:cloud",
-        "Gemini-3-Flash": "gemini-3-flash-preview",
-        "Coder-Nano": "cogito-2.1:671b-cloud",
-        "Deepseek-V3.2": "deepseek-v3.2:cloud",
-        "Deepseek-V3.1": "deepseek-v3.1:671b-cloud",
-        "Qwen3-Coder": "qwen3-coder:480b-cloud",
-        "Kimi-K2-Thinking": "kimi-k2-thinking:cloud",
-        "Captain": "gpt-oss:120b",
-        "Kimi-K2.5": "kimi-k2.5:cloud",
-        "Minimax-M2.5": "minimax-m2.5:cloud",
-        "Coder-Max": "minimax-m2.7:cloud",
-        "Coder-Pro": "mistral-large-3:675b-cloud",
-        "Qwen-Flash": "cerebras/qwen-3-235b-a22b-instruct-2507",
-        "Codestral-Max": "mistral/codestral-latest",
-        "Codestral": "mistral/codestral-2508",
-        "Mistral-Max": "mistral/mistral-large-latest",
-        "Mistral-Flash": "mistral/mistral-small-2603",
-        "Ghost-V1": "nvidia/nemotron-3-nano-30b-a3b:free",
-    }
+    MODEL_MAPPING = {}
     MODEL_PROVIDER_PATHS = {
         "ollama": "ollama/models",
         "openrouter": "openrouter/models",
@@ -219,6 +198,28 @@ class OmniTitanManager:
             grouped[self._provider_prefix(real_model)][alias] = real_model
         return grouped
 
+    def _validate_model_registry(self, grouped):
+        issues = []
+
+        for alias, real_model in grouped["cerebras"].items():
+            if not real_model.startswith("cerebras/"):
+                issues.append(f"Cerebras model '{alias}' should start with 'cerebras/'")
+
+        for alias, real_model in grouped["mistral"].items():
+            if not real_model.startswith("mistral/"):
+                issues.append(f"Mistral model '{alias}' should start with 'mistral/'")
+
+        for alias, real_model in grouped["openrouter"].items():
+            if "/" not in real_model or real_model.startswith("cerebras/") or real_model.startswith("mistral/"):
+                issues.append(f"OpenRouter model '{alias}' should be a vendor/model id without the cerebras/mistral prefix")
+
+        for alias, real_model in grouped["ollama"].items():
+            if real_model.startswith("cerebras/") or real_model.startswith("mistral/") or "/" in real_model:
+                issues.append(f"Ollama model '{alias}' should not use provider prefixes or vendor/model syntax")
+
+        for issue in issues:
+            print(f"[Omni-Titan] Model registry warning: {issue}")
+
     def _load_model_mapping(self):
         grouped = self._default_models_by_provider()
 
@@ -249,6 +250,7 @@ class OmniTitanManager:
         merged = {}
         for provider in self.MODEL_PROVIDER_PATHS:
             merged.update(grouped[provider])
+        self._validate_model_registry(grouped)
         return merged
 
     def _persist_models(self):
