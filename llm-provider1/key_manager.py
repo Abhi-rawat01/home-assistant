@@ -37,6 +37,10 @@ class OmniTitanManager:
         "Coder-Max": "minimax-m2.7:cloud",
         "Coder-Pro": "mistral-large-3:675b-cloud",
         "Qwen-Flash": "cerebras/qwen-3-235b-a22b-instruct-2507",
+        "Codestral-Max": "mistral/codestral-latest",
+        "Codestral": "mistral/codestral-2508",
+        "Mistral-Max": "mistral/mistral-large-latest",
+        "Mistral-Flash": "mistral/mistral-small-2603",
         "Ghost-V1": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     }
     OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Max", "Coder-Pro"]
@@ -53,6 +57,7 @@ class OmniTitanManager:
         self.ollama_keys = []
         self.or_keys = []
         self.cerebras_keys = []
+        self.mistral_keys = []
         self.ollama_health = {}
         self.gatekeeper_segments = {}
         self.lock = threading.Lock()
@@ -66,6 +71,7 @@ class OmniTitanManager:
     def _sync(self):
         try:
             self.cerebras_keys = []
+            self.mistral_keys = []
 
             r = requests.get(self._fb("cerebras/keys"), timeout=10)
             if r.status_code == 200 and r.json():
@@ -74,6 +80,14 @@ class OmniTitanManager:
 
             if not self.cerebras_keys:
                 self.cerebras_keys = self._load_cerebras_keys()
+
+            r = requests.get(self._fb("mistral/keys"), timeout=10)
+            if r.status_code == 200 and r.json():
+                data = r.json()
+                self.mistral_keys = [k.strip() for k in (data.split(",") if isinstance(data, str) else data) if k and k.strip()]
+
+            if not self.mistral_keys:
+                self.mistral_keys = self._load_mistral_keys()
 
             r = requests.get(self._fb("ollama/keys"), timeout=10)
             if r.status_code == 200 and r.json():
@@ -130,7 +144,8 @@ class OmniTitanManager:
 
             print(
                 f"[Omni-Titan] {len(self.ollama_keys)} Ollama keys, "
-                f"{len(self.or_keys)} OpenRouter keys, and {len(self.cerebras_keys)} Cerebras keys loaded."
+                f"{len(self.or_keys)} OpenRouter keys, {len(self.cerebras_keys)} Cerebras keys, "
+                f"and {len(self.mistral_keys)} Mistral keys loaded."
             )
             self._persist()
         except Exception as exc:
@@ -145,6 +160,23 @@ class OmniTitanManager:
         main_key = os.getenv("MAIN_LLM_API_KEY", "").strip()
         if main_key and main_key not in keys:
             keys.append(main_key)
+
+        return keys
+
+    def _load_mistral_keys(self):
+        keys = []
+
+        env_key = os.getenv("MISTRAL_API_KEY", "").strip()
+        if env_key:
+            keys.append(env_key)
+
+        keys_file = os.path.join(os.path.dirname(__file__), "mistral_master.txt")
+        if os.path.exists(keys_file):
+            with open(keys_file, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    key = line.strip()
+                    if key and key not in keys:
+                        keys.append(key)
 
         return keys
 
@@ -210,6 +242,11 @@ class OmniTitanManager:
             return None
         return self.cerebras_keys[int(time.time()) % len(self.cerebras_keys)]
 
+    def _mistral_key(self):
+        if not self.mistral_keys:
+            return None
+        return self.mistral_keys[int(time.time()) % len(self.mistral_keys)]
+
     def chat_completion(self, gatekeeper, messages, model="Coder-Fast"):
         if gatekeeper not in self.gatekeepers:
             return {"error": "Unauthorized"}, 401
@@ -264,6 +301,33 @@ class OmniTitanManager:
                         payload = response.json()
                     except ValueError:
                         payload = {"error": f"Cerebras {response.status_code}"}
+                    return payload, response.status_code
+                except Exception as exc:
+                    return {"error": str(exc)}, 502
+
+            if real_model.startswith("mistral/"):
+                key = self._mistral_key()
+                if not key:
+                    return {"error": "Mistral is not configured for this server"}, 503
+
+                try:
+                    response = requests.post(
+                        "https://api.mistral.ai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={
+                            "model": real_model.split("/", 1)[1],
+                            "messages": final_messages,
+                            "stream": False,
+                        },
+                        timeout=180,
+                    )
+                    if response.status_code == 200:
+                        return response.json(), 200
+
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = {"error": f"Mistral {response.status_code}"}
                     return payload, response.status_code
                 except Exception as exc:
                     return {"error": str(exc)}, 502
