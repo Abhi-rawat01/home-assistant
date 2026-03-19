@@ -41,7 +41,7 @@ class OmniTitanManager:
         "Codestral": "mistral/codestral-2508",
         "Mistral-Max": "mistral/mistral-large-latest",
         "Mistral-Flash": "mistral/mistral-small-2603",
-        "Ghost-V1": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+        "Ghost-V1": "nvidia/nemotron-3-nano-30b-a3b:free",
     }
     OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Max", "Coder-Pro"]
 
