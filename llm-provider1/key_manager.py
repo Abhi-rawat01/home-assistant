@@ -2,7 +2,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -20,6 +20,7 @@ omni = None
 
 
 class OmniTitanManager:
+    KEY_RETRY_INTERVAL = timedelta(hours=12)
     MODEL_MAPPING = {
         "Coder-Fast": "qwen3-coder-next:cloud",
         "Glm-5": "glm-5:cloud",
@@ -33,10 +34,11 @@ class OmniTitanManager:
         "Captain": "gpt-oss:120b",
         "Kimi-K2.5": "kimi-k2.5:cloud",
         "Minimax-M2.5": "minimax-m2.5:cloud",
+        "Coder-Max": "minimax-m2.7:cloud",
         "Coder-Pro": "mistral-large-3:675b-cloud",
-        "Alpha": "openrouter/hunter-alpha",
+        "Ghost-V1": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     }
-    OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Pro"]
+    OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Max", "Coder-Pro"]
 
     def __init__(self, daily_limit=200000):
         self.daily_limit = daily_limit
@@ -89,14 +91,17 @@ class OmniTitanManager:
                 self.gatekeeper_segments = {}
 
                 for idx, key in enumerate(self.ollama_keys):
+                    key_state = cloud.get(f"key_{idx + 1}", {})
                     remaining_tokens = (
-                        cloud.get(f"key_{idx + 1}", {}).get("remaining_tokens", self.daily_limit)
+                        key_state.get("remaining_tokens", self.daily_limit)
                         if today == cloud.get("last_sync_date", "")
                         else self.daily_limit
                     )
+                    sleep_until = key_state.get("sleep_until")
                     self.ollama_health[key] = {
                         "id": f"key_{idx + 1}",
                         "remaining_tokens": remaining_tokens,
+                        "sleep_until": sleep_until,
                     }
 
                 if self.gatekeepers and self.ollama_keys:
@@ -122,17 +127,56 @@ class OmniTitanManager:
             with self.lock:
                 for key in self.ollama_keys:
                     payload[self.ollama_health[key]["id"]] = {
-                        "remaining_tokens": self.ollama_health[key]["remaining_tokens"]
+                        "remaining_tokens": self.ollama_health[key]["remaining_tokens"],
+                        "sleep_until": self.ollama_health[key].get("sleep_until"),
                     }
             requests.put(self._fb("ollama/credit_manager"), json=payload, timeout=5)
         except Exception as exc:
             print(f"[Omni-Titan] Credit sync error: {exc}")
 
-    def _best_key(self, gatekeeper, tokens):
+    def _is_key_sleeping(self, key):
+        sleep_until = self.ollama_health.get(key, {}).get("sleep_until")
+        if not sleep_until:
+            return False
+
+        try:
+            wake_at = datetime.fromisoformat(sleep_until)
+        except ValueError:
+            return False
+
+        return datetime.now() < wake_at
+
+    def _mark_key_sleeping(self, key):
+        wake_at = (datetime.now() + self.KEY_RETRY_INTERVAL).isoformat()
+        with self.lock:
+            if key in self.ollama_health:
+                self.ollama_health[key]["sleep_until"] = wake_at
+        print(f"[Omni-Titan] Key {self.ollama_health.get(key, {}).get('id', 'unknown')} sleeping until {wake_at}")
+        threading.Thread(target=self._persist, daemon=True).start()
+
+    def _clear_key_sleep(self, key):
+        with self.lock:
+            if key in self.ollama_health and self.ollama_health[key].get("sleep_until"):
+                self.ollama_health[key]["sleep_until"] = None
+
+    def _is_quota_exhausted(self, status_code, payload):
+        if status_code != 429:
+            return False
+
+        error_text = json.dumps(payload).lower() if isinstance(payload, (dict, list)) else str(payload).lower()
+        markers = ["weekly usage limit", "upgrade for higher limits", "usage limit"]
+        return any(marker in error_text for marker in markers)
+
+    def _candidate_keys(self, gatekeeper, tokens, exclude_keys=None):
+        exclude_keys = exclude_keys or set()
         with self.lock:
             segment = self.gatekeeper_segments.get(gatekeeper, [])
-            eligible = [key for key in segment if self.ollama_health[key]["remaining_tokens"] >= tokens]
-            return max(eligible, key=lambda key: self.ollama_health[key]["remaining_tokens"]) if eligible else None
+            eligible = [
+                key for key in segment
+                if key not in exclude_keys and self.ollama_health[key]["remaining_tokens"] >= tokens and not self._is_key_sleeping(key)
+            ]
+            eligible.sort(key=lambda key: self.ollama_health[key]["remaining_tokens"], reverse=True)
+            return eligible
 
     def chat_completion(self, gatekeeper, messages, model="Coder-Fast"):
         if gatekeeper not in self.gatekeepers:
@@ -185,36 +229,63 @@ class OmniTitanManager:
                 return {"error": str(exc)}, 502
 
         estimated_tokens = len(json.dumps(final_messages)) // 4
-        key = self._best_key(gatekeeper, estimated_tokens)
-        if not key:
+        attempted_keys = set()
+        candidate_keys = self._candidate_keys(gatekeeper, estimated_tokens)
+        if not candidate_keys:
             return {"error": "Credits exhausted for your API segment"}, 429
 
-        try:
-            response = requests.post(
-                "https://ollama.com/api/chat",
-                headers={"Authorization": f"Bearer {key}"},
-                json={"model": real_model, "messages": final_messages, "stream": False},
-                timeout=120,
-            )
-            if response.status_code == 200:
-                payload = response.json()
-                spent = estimated_tokens + len(payload.get("message", {}).get("content", "")) // 4 + 100
-                with self.lock:
-                    self.ollama_health[key]["remaining_tokens"] -= spent
-                threading.Thread(target=self._persist, daemon=True).start()
-                return {
-                    "id": f"titan-{int(time.time())}",
-                    "choices": [{"message": payload.get("message", {}), "finish_reason": "stop"}],
-                    "usage": {"total_tokens": spent},
-                }, 200
+        last_payload = None
+        last_status = 502
 
+        while candidate_keys:
+            key = candidate_keys.pop(0)
+            attempted_keys.add(key)
             try:
-                payload = response.json()
-            except ValueError:
-                payload = {"error": f"Ollama {response.status_code}"}
-            return payload, response.status_code
-        except Exception as exc:
-            return {"error": str(exc)}, 502
+                response = requests.post(
+                    "https://ollama.com/api/chat",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": real_model, "messages": final_messages, "stream": False},
+                    timeout=120,
+                )
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = {"error": f"Ollama {response.status_code}"}
+
+                if response.status_code == 200:
+                    self._clear_key_sleep(key)
+                    spent = estimated_tokens + len(payload.get("message", {}).get("content", "")) // 4 + 100
+                    with self.lock:
+                        self.ollama_health[key]["remaining_tokens"] -= spent
+                    threading.Thread(target=self._persist, daemon=True).start()
+                    return {
+                        "id": f"titan-{int(time.time())}",
+                        "choices": [{"message": payload.get("message", {}), "finish_reason": "stop"}],
+                        "usage": {"total_tokens": spent},
+                    }, 200
+
+                last_payload = payload
+                last_status = response.status_code
+
+                if self._is_quota_exhausted(response.status_code, payload):
+                    self._mark_key_sleeping(key)
+                    candidate_keys = self._candidate_keys(gatekeeper, estimated_tokens, exclude_keys=attempted_keys)
+                    continue
+
+                if response.status_code >= 500:
+                    candidate_keys = self._candidate_keys(gatekeeper, estimated_tokens, exclude_keys=attempted_keys)
+                    if candidate_keys:
+                        continue
+
+                return payload, response.status_code
+            except Exception as exc:
+                last_payload = {"error": str(exc)}
+                last_status = 502
+                candidate_keys = self._candidate_keys(gatekeeper, estimated_tokens, exclude_keys=attempted_keys)
+                if candidate_keys:
+                    continue
+
+        return last_payload or {"error": "Credits exhausted for your API segment"}, last_status
 
 
 def _public_base_url():
