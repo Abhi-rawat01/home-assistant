@@ -43,6 +43,12 @@ class OmniTitanManager:
         "Mistral-Flash": "mistral/mistral-small-2603",
         "Ghost-V1": "nvidia/nemotron-3-nano-30b-a3b:free",
     }
+    MODEL_PROVIDER_PATHS = {
+        "ollama": "ollama/models",
+        "openrouter": "openrouter/models",
+        "cerebras": "cerebras/models",
+        "mistral": "mistral/models",
+    }
     OWN_MODELS = ["Captain", "Coder-Fast", "Coder-Mini", "Coder-Nano", "Coder-Max", "Coder-Pro"]
 
     def __init__(self, daily_limit=200000):
@@ -58,6 +64,7 @@ class OmniTitanManager:
         self.or_keys = []
         self.cerebras_keys = []
         self.mistral_keys = []
+        self.model_mapping = dict(self.MODEL_MAPPING)
         self.ollama_health = {}
         self.mistral_health = {}
         self.gatekeeper_segments = {}
@@ -73,6 +80,7 @@ class OmniTitanManager:
         try:
             self.cerebras_keys = []
             self.mistral_keys = []
+            self.model_mapping = self._load_model_mapping()
 
             r = requests.get(self._fb("cerebras/keys"), timeout=10)
             if r.status_code == 200 and r.json():
@@ -162,6 +170,7 @@ class OmniTitanManager:
                 f"{len(self.or_keys)} OpenRouter keys, {len(self.cerebras_keys)} Cerebras keys, "
                 f"and {len(self.mistral_keys)} Mistral keys loaded."
             )
+            self._persist_models()
             self._persist()
         except Exception as exc:
             print(f"[Omni-Titan] Sync error: {exc}")
@@ -194,6 +203,65 @@ class OmniTitanManager:
                         keys.append(key)
 
         return keys
+
+    def _provider_prefix(self, real_model):
+        if real_model.startswith("cerebras/"):
+            return "cerebras"
+        if real_model.startswith("mistral/"):
+            return "mistral"
+        if "/" in real_model:
+            return "openrouter"
+        return "ollama"
+
+    def _default_models_by_provider(self):
+        grouped = {provider: {} for provider in self.MODEL_PROVIDER_PATHS}
+        for alias, real_model in self.MODEL_MAPPING.items():
+            grouped[self._provider_prefix(real_model)][alias] = real_model
+        return grouped
+
+    def _load_model_mapping(self):
+        grouped = self._default_models_by_provider()
+
+        for provider, path in self.MODEL_PROVIDER_PATHS.items():
+            try:
+                response = requests.get(self._fb(path), timeout=10)
+                if response.status_code == 200 and response.json():
+                    data = response.json()
+                    if isinstance(data, dict):
+                        grouped[provider].update(
+                            {
+                                alias.strip(): real_model.strip()
+                                for alias, real_model in data.items()
+                                if str(alias).strip() and str(real_model).strip()
+                            }
+                        )
+                    elif isinstance(data, list):
+                        for item in data:
+                            if not isinstance(item, dict):
+                                continue
+                            alias = str(item.get("alias", "")).strip()
+                            real_model = str(item.get("model", "")).strip()
+                            if alias and real_model:
+                                grouped[provider][alias] = real_model
+            except Exception as exc:
+                print(f"[Omni-Titan] Model load warning for {provider}: {exc}")
+
+        merged = {}
+        for provider in self.MODEL_PROVIDER_PATHS:
+            merged.update(grouped[provider])
+        return merged
+
+    def _persist_models(self):
+        try:
+            grouped = {provider: {} for provider in self.MODEL_PROVIDER_PATHS}
+            for alias, real_model in self.model_mapping.items():
+                grouped[self._provider_prefix(real_model)][alias] = real_model
+
+            for provider, path in self.MODEL_PROVIDER_PATHS.items():
+                payload = [{"alias": alias, "model": real_model} for alias, real_model in grouped[provider].items()]
+                requests.put(self._fb(path), json=payload, timeout=10)
+        except Exception as exc:
+            print(f"[Omni-Titan] Model sync error: {exc}")
 
     def _persist(self):
         try:
@@ -324,7 +392,7 @@ class OmniTitanManager:
         if gatekeeper not in self.gatekeepers:
             return {"error": "Unauthorized"}, 401
 
-        real_model = self.MODEL_MAPPING.get(model)
+        real_model = self.model_mapping.get(model)
         if not real_model:
             return {"error": f"Model '{model}' not found"}, 404
 
@@ -613,7 +681,11 @@ def chat():
 
 @app.route("/v1/models", methods=["GET"])
 def models():
-    return jsonify({"object": "list", "data": [{"id": model} for model in OmniTitanManager.MODEL_MAPPING]})
+    manager, error_response = _require_omni()
+    if error_response:
+        return jsonify({"object": "list", "data": [{"id": model} for model in OmniTitanManager.MODEL_MAPPING]})
+
+    return jsonify({"object": "list", "data": [{"id": model} for model in manager.model_mapping]})
 
 
 @app.route("/healthz", methods=["GET"])
