@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -20,6 +21,34 @@ _model_registry_lock = threading.Lock()
 _model_registry_cache = {}
 _model_registry_cache_at = 0.0
 omni = None
+_NOISY_LOG_PATH_MARKERS = (
+    '"HEAD / HTTP/',
+    '"GET / HTTP/',
+    '"GET /healthz',
+    '"HEAD /healthz',
+    '"GET /favicon.ico',
+    '"HEAD /favicon.ico',
+)
+
+
+class _QuietAccessLogFilter(logging.Filter):
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return not any(marker in message for marker in _NOISY_LOG_PATH_MARKERS)
+
+
+def _configure_log_filters():
+    filter_instance = _QuietAccessLogFilter()
+    for logger_name in ("werkzeug", "gunicorn.access"):
+        logger = logging.getLogger(logger_name)
+        if not any(isinstance(existing, _QuietAccessLogFilter) for existing in logger.filters):
+            logger.addFilter(filter_instance)
+
+
+_configure_log_filters()
 
 
 class OmniTitanManager:
