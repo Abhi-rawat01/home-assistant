@@ -59,6 +59,7 @@ class OmniTitanManager:
         self.cerebras_keys = []
         self.mistral_keys = []
         self.ollama_health = {}
+        self.mistral_health = {}
         self.gatekeeper_segments = {}
         self.lock = threading.Lock()
 
@@ -89,6 +90,9 @@ class OmniTitanManager:
             if not self.mistral_keys:
                 self.mistral_keys = self._load_mistral_keys()
 
+            r = requests.get(self._fb("mistral/key_health"), timeout=10)
+            mistral_cloud = r.json() if r.status_code == 200 and r.json() else {}
+
             r = requests.get(self._fb("ollama/keys"), timeout=10)
             if r.status_code == 200 and r.json():
                 data = r.json()
@@ -114,6 +118,7 @@ class OmniTitanManager:
 
             with self.lock:
                 self.ollama_health = {}
+                self.mistral_health = {}
                 self.gatekeeper_segments = {}
 
                 for idx, key in enumerate(self.ollama_keys):
@@ -128,6 +133,16 @@ class OmniTitanManager:
                         "id": f"key_{idx + 1}",
                         "remaining_tokens": remaining_tokens,
                         "sleep_until": sleep_until,
+                    }
+
+                for idx, key in enumerate(self.mistral_keys):
+                    key_state = mistral_cloud.get(f"key_{idx + 1}", {})
+                    self.mistral_health[key] = {
+                        "id": f"key_{idx + 1}",
+                        "status": key_state.get("status", "live"),
+                        "retry_on_date": key_state.get("retry_on_date"),
+                        "last_checked_date": key_state.get("last_checked_date"),
+                        "last_error": key_state.get("last_error"),
                     }
 
                 if self.gatekeepers and self.ollama_keys:
@@ -183,13 +198,22 @@ class OmniTitanManager:
     def _persist(self):
         try:
             payload = {"last_sync_date": datetime.now().strftime("%Y-%m-%d")}
+            mistral_payload = {"last_sync_date": datetime.now().strftime("%Y-%m-%d")}
             with self.lock:
                 for key in self.ollama_keys:
                     payload[self.ollama_health[key]["id"]] = {
                         "remaining_tokens": self.ollama_health[key]["remaining_tokens"],
                         "sleep_until": self.ollama_health[key].get("sleep_until"),
                     }
+                for key in self.mistral_keys:
+                    mistral_payload[self.mistral_health[key]["id"]] = {
+                        "status": self.mistral_health[key].get("status", "live"),
+                        "retry_on_date": self.mistral_health[key].get("retry_on_date"),
+                        "last_checked_date": self.mistral_health[key].get("last_checked_date"),
+                        "last_error": self.mistral_health[key].get("last_error"),
+                    }
             requests.put(self._fb("ollama/credit_manager"), json=payload, timeout=5)
+            requests.put(self._fb("mistral/key_health"), json=mistral_payload, timeout=5)
         except Exception as exc:
             print(f"[Omni-Titan] Credit sync error: {exc}")
 
@@ -243,9 +267,58 @@ class OmniTitanManager:
         return self.cerebras_keys[int(time.time()) % len(self.cerebras_keys)]
 
     def _mistral_key(self):
-        if not self.mistral_keys:
-            return None
-        return self.mistral_keys[int(time.time()) % len(self.mistral_keys)]
+        candidates = self._mistral_candidate_keys()
+        return candidates[0] if candidates else None
+
+    def _mistral_candidate_keys(self, exclude_keys=None):
+        exclude_keys = exclude_keys or set()
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        with self.lock:
+            candidates = []
+            for key in self.mistral_keys:
+                if key in exclude_keys:
+                    continue
+
+                state = self.mistral_health.get(
+                    key,
+                    {"id": "unknown", "status": "live", "retry_on_date": None, "last_checked_date": None, "last_error": None},
+                )
+                retry_on_date = state.get("retry_on_date")
+                is_dead = state.get("status") == "dead" and retry_on_date and retry_on_date > today
+                if is_dead:
+                    continue
+                candidates.append(key)
+
+            candidates.sort(
+                key=lambda key: (
+                    self.mistral_health.get(key, {}).get("status") == "dead",
+                    self.mistral_health.get(key, {}).get("last_checked_date") == today,
+                    self.mistral_health.get(key, {}).get("id", ""),
+                )
+            )
+            return candidates
+
+    def _mark_mistral_key_dead(self, key, error_payload):
+        retry_on_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self.lock:
+            state = self.mistral_health.setdefault(key, {"id": "unknown"})
+            state["status"] = "dead"
+            state["retry_on_date"] = retry_on_date
+            state["last_checked_date"] = today
+            state["last_error"] = json.dumps(error_payload)[:500]
+        print(f"[Omni-Titan] Mistral key {self.mistral_health.get(key, {}).get('id', 'unknown')} marked dead until {retry_on_date}")
+        threading.Thread(target=self._persist, daemon=True).start()
+
+    def _mark_mistral_key_live(self, key):
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self.lock:
+            state = self.mistral_health.setdefault(key, {"id": "unknown"})
+            state["status"] = "live"
+            state["retry_on_date"] = None
+            state["last_checked_date"] = today
+            state["last_error"] = None
 
     def chat_completion(self, gatekeeper, messages, model="Coder-Fast"):
         if gatekeeper not in self.gatekeepers:
@@ -306,31 +379,58 @@ class OmniTitanManager:
                     return {"error": str(exc)}, 502
 
             if real_model.startswith("mistral/"):
-                key = self._mistral_key()
-                if not key:
+                attempted_mistral_keys = set()
+                candidate_mistral_keys = self._mistral_candidate_keys()
+                if not candidate_mistral_keys:
                     return {"error": "Mistral is not configured for this server"}, 503
 
-                try:
-                    response = requests.post(
-                        "https://api.mistral.ai/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={
-                            "model": real_model.split("/", 1)[1],
-                            "messages": final_messages,
-                            "stream": False,
-                        },
-                        timeout=180,
-                    )
-                    if response.status_code == 200:
-                        return response.json(), 200
-
+                last_payload = {"error": "No working Mistral key available"}
+                last_status = 503
+                while candidate_mistral_keys:
+                    key = candidate_mistral_keys.pop(0)
+                    attempted_mistral_keys.add(key)
                     try:
-                        payload = response.json()
-                    except ValueError:
-                        payload = {"error": f"Mistral {response.status_code}"}
-                    return payload, response.status_code
-                except Exception as exc:
-                    return {"error": str(exc)}, 502
+                        response = requests.post(
+                            "https://api.mistral.ai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {key}"},
+                            json={
+                                "model": real_model.split("/", 1)[1],
+                                "messages": final_messages,
+                                "stream": False,
+                            },
+                            timeout=180,
+                        )
+                        try:
+                            payload = response.json()
+                        except ValueError:
+                            payload = {"error": f"Mistral {response.status_code}"}
+
+                        if response.status_code == 200:
+                            self._mark_mistral_key_live(key)
+                            return payload, 200
+
+                        last_payload = payload
+                        last_status = response.status_code
+
+                        if response.status_code in (401, 403, 429):
+                            self._mark_mistral_key_dead(key, payload)
+                            candidate_mistral_keys = self._mistral_candidate_keys(exclude_keys=attempted_mistral_keys)
+                            continue
+
+                        if response.status_code >= 500:
+                            candidate_mistral_keys = self._mistral_candidate_keys(exclude_keys=attempted_mistral_keys)
+                            if candidate_mistral_keys:
+                                continue
+
+                        return payload, response.status_code
+                    except Exception as exc:
+                        last_payload = {"error": str(exc)}
+                        last_status = 502
+                        candidate_mistral_keys = self._mistral_candidate_keys(exclude_keys=attempted_mistral_keys)
+                        if candidate_mistral_keys:
+                            continue
+
+                return last_payload, last_status
 
             if not self.or_keys:
                 return {"error": "OpenRouter is not configured for this server"}, 503
